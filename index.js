@@ -3,9 +3,9 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 
-const authRoutes = require('./routes/auth');
-const salesmanRoutes = require('./routes/salesman');
-const adminRoutes = require('./routes/admin');
+const authRoutes = require('./src/routes/auth');
+const salesmanRoutes = require('./src/routes/salesman');
+const adminRoutes = require('./src/routes/admin');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -24,7 +24,7 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.use('/api', salesmanRoutes);
 
 // Serve web admin dashboard
-app.use(express.static(path.join(__dirname, '..', '..', 'web')));
+app.use(express.static(path.join(__dirname, 'web')));
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on 0.0.0.0:${PORT}`);

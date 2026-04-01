@@ -4,7 +4,6 @@
   "description": "Salesman location tracking API",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
     "seed": "node src/db/seed.js"
   },
   "dependencies": {

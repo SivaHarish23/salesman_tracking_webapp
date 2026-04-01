@@ -1,0 +1,8 @@
+node_modules/
+.env
+*.iml
+.idea/
+.dart_tool/
+build/
+.packages
+pubspec.lock

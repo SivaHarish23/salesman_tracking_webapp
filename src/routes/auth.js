@@ -6,21 +6,25 @@ const { loginLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
 
+// Pre-hash a dummy password for constant-time comparison when user doesn't exist
+const DUMMY_HASH = bcrypt.hashSync('0000', 10);
+
 router.post('/login', loginLimiter, async (req, res) => {
   try {
     const { username, password } = req.body;
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password required' });
     }
-
-    const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-    if (result.rows.length === 0) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+    if (typeof username !== 'string' || username.length > 50) {
+      return res.status(400).json({ error: 'Invalid username' });
     }
 
+    const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
     const user = result.rows[0];
-    const valid = await bcrypt.compare(password, user.password);
-    if (!valid) {
+
+    // Always run bcrypt compare to prevent timing-based user enumeration
+    const valid = await bcrypt.compare(password, user ? user.password : DUMMY_HASH);
+    if (!user || !valid) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
@@ -35,7 +39,7 @@ router.post('/login', loginLimiter, async (req, res) => {
       user: { id: user.id, username: user.username, role: user.role },
     });
   } catch (err) {
-    console.error('Login error:', err);
+    console.error('Login error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });

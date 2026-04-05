@@ -9,6 +9,7 @@ const salesmanRoutes = require('./src/routes/salesman');
 const adminRoutes = require('./src/routes/admin');
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 const STALE_SESSION_HOURS = 24;
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;

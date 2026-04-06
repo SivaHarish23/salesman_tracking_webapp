@@ -178,12 +178,13 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
 
     // Validate and collect all valid points first
     const validPoints = [];
+    const rejections = [];
     for (const pt of points) {
       const { uid, latitude, longitude, recorded_at } = pt;
 
       // Validate uid
       if (!uid || typeof uid !== 'string' || uid.length > MAX_UID_LENGTH) {
-        console.log('[BATCH] Rejected point: bad uid', { uid, type: typeof uid });
+        rejections.push({ uid: uid || null, reason: 'bad_uid', type: typeof uid });
         continue;
       }
 
@@ -192,7 +193,7 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
       const lng = typeof longitude === 'number' ? longitude : parseFloat(longitude);
       const coordError = validateCoords(lat, lng);
       if (coordError) {
-        console.log('[BATCH] Rejected point: coord error', { uid, lat, lng, coordError });
+        rejections.push({ uid, reason: 'bad_coords', detail: coordError });
         continue;
       }
 
@@ -201,28 +202,29 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
       try {
         ts = new Date(recorded_at);
         if (isNaN(ts.getTime())) {
-          console.log('[BATCH] Rejected point: invalid date', { uid, recorded_at });
+          rejections.push({ uid, reason: 'invalid_date', recorded_at });
           continue;
         }
         if (ts > new Date(now.getTime() + FUTURE_TOLERANCE_MS)) {
-          console.log('[BATCH] Rejected point: future timestamp', { uid, recorded_at, ts: ts.toISOString(), now: now.toISOString() });
+          rejections.push({ uid, reason: 'future', ts: ts.toISOString(), now: now.toISOString() });
           continue;
         }
         if (now - ts > MAX_POINT_AGE_MS) {
-          console.log('[BATCH] Rejected point: too old', { uid, recorded_at, ts: ts.toISOString(), now: now.toISOString(), ageMs: now - ts });
+          rejections.push({ uid, reason: 'too_old', ts: ts.toISOString(), now: now.toISOString(), ageMs: now - ts });
           continue;
         }
       } catch (e) {
-        console.log('[BATCH] Rejected point: date parse exception', { uid, recorded_at, error: e.message });
+        rejections.push({ uid, reason: 'date_exception', error: e.message });
         continue;
       }
 
       validPoints.push({ uid, latitude: lat, longitude: lng, ts });
     }
-    console.log(`[BATCH] user=${req.user.userId}: ${validPoints.length}/${points.length} points valid`);
+    console.log(`[BATCH] user=${req.user.userId}: ${validPoints.length}/${points.length} valid, rejections:`, rejections);
 
     // Insert all valid points in a single transaction
     let inserted = 0;
+    const insertErrors = [];
     if (validPoints.length > 0) {
       await client.query('BEGIN');
       for (const { uid, latitude, longitude, ts } of validPoints) {
@@ -234,14 +236,14 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
             [sessionId, req.user.userId, latitude, longitude, ts.toISOString(), uid]
           );
           inserted++;
-        } catch {
-          // Skip individual insert failures (e.g., constraint violations)
+        } catch (e) {
+          insertErrors.push({ uid, error: e.message });
         }
       }
       await client.query('COMMIT');
     }
 
-    res.json({ ok: true, inserted, total: points.length });
+    res.json({ ok: true, inserted, total: points.length, validated: validPoints.length, rejections, insertErrors });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('Batch location error:', err.message);

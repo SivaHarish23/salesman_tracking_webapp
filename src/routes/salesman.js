@@ -182,27 +182,44 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
       const { uid, latitude, longitude, recorded_at } = pt;
 
       // Validate uid
-      if (!uid || typeof uid !== 'string' || uid.length > MAX_UID_LENGTH) continue;
+      if (!uid || typeof uid !== 'string' || uid.length > MAX_UID_LENGTH) {
+        console.log('[BATCH] Rejected point: bad uid', { uid, type: typeof uid });
+        continue;
+      }
 
       // Validate coords
       const lat = typeof latitude === 'number' ? latitude : parseFloat(latitude);
       const lng = typeof longitude === 'number' ? longitude : parseFloat(longitude);
       const coordError = validateCoords(lat, lng);
-      if (coordError) continue;
+      if (coordError) {
+        console.log('[BATCH] Rejected point: coord error', { uid, lat, lng, coordError });
+        continue;
+      }
 
       // Validate recorded_at timestamp (must be within 24h and not in the future)
       let ts;
       try {
         ts = new Date(recorded_at);
-        if (isNaN(ts.getTime())) continue;
-        if (ts > new Date(now.getTime() + FUTURE_TOLERANCE_MS)) continue;
-        if (now - ts > MAX_POINT_AGE_MS) continue;
-      } catch {
+        if (isNaN(ts.getTime())) {
+          console.log('[BATCH] Rejected point: invalid date', { uid, recorded_at });
+          continue;
+        }
+        if (ts > new Date(now.getTime() + FUTURE_TOLERANCE_MS)) {
+          console.log('[BATCH] Rejected point: future timestamp', { uid, recorded_at, ts: ts.toISOString(), now: now.toISOString() });
+          continue;
+        }
+        if (now - ts > MAX_POINT_AGE_MS) {
+          console.log('[BATCH] Rejected point: too old', { uid, recorded_at, ts: ts.toISOString(), now: now.toISOString(), ageMs: now - ts });
+          continue;
+        }
+      } catch (e) {
+        console.log('[BATCH] Rejected point: date parse exception', { uid, recorded_at, error: e.message });
         continue;
       }
 
       validPoints.push({ uid, latitude: lat, longitude: lng, ts });
     }
+    console.log(`[BATCH] user=${req.user.userId}: ${validPoints.length}/${points.length} points valid`);
 
     // Insert all valid points in a single transaction
     let inserted = 0;

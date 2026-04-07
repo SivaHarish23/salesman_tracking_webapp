@@ -71,17 +71,89 @@ function lerpColor(a, b, t) {
   return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${bl.toString(16).padStart(2, '0')}`;
 }
 
+// Centripetal Catmull-Rom spline (alpha=0.5) — smooth curve through all points
+function catmullRomSpline(points, numPerSeg) {
+  if (points.length < 2) return points.slice();
+  numPerSeg = numPerSeg || 8;
+  const pts = [points[0], ...points, points[points.length - 1]]; // duplicate ends
+  const result = [];
+  for (let i = 1; i < pts.length - 2; i++) {
+    const p0 = pts[i - 1], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2];
+    for (let s = 0; s < numPerSeg; s++) {
+      const t = s / numPerSeg;
+      const t2 = t * t, t3 = t2 * t;
+      const lat = 0.5 * (
+        (2 * p1[0]) +
+        (-p0[0] + p2[0]) * t +
+        (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
+        (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3
+      );
+      const lng = 0.5 * (
+        (2 * p1[1]) +
+        (-p0[1] + p2[1]) * t +
+        (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+        (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3
+      );
+      result.push([lat, lng]);
+    }
+  }
+  result.push(pts[pts.length - 2]); // add last original point
+  return result;
+}
+
+// Interpolate a position along an array of [lat,lng] at float index t
+function interpolateOnPath(points, t) {
+  if (points.length === 0) return [0, 0];
+  if (t <= 0) return points[0];
+  if (t >= points.length - 1) return points[points.length - 1];
+  const i = Math.floor(t);
+  const f = t - i;
+  const a = points[i], b = points[i + 1];
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+}
+
 function createSpeedPolyline(locations) {
   const group = L.layerGroup();
+  if (locations.length < 2) return group;
+
+  const rawPts = locations.map(l => [l.latitude, l.longitude]);
+  const NUM_SUB = 8; // interpolated sub-points per segment
+
+  // Build smoothed sub-points for each original segment, colored by speed
   for (let i = 0; i < locations.length - 1; i++) {
     const a = locations[i], b = locations[i + 1];
     const dist = haversineDistance(a.latitude, a.longitude, b.latitude, b.longitude);
     const dt = (new Date(b.recorded_at) - new Date(a.recorded_at)) / 1000;
     const kmh = dt > 0 ? (dist / dt) * 3.6 : 0;
-    L.polyline(
-      [[a.latitude, a.longitude], [b.latitude, b.longitude]],
-      { color: speedColor(kmh), weight: 4, opacity: 0.8 }
-    ).addTo(group);
+    const color = speedColor(kmh);
+
+    // Get the 4 control points for this segment's spline
+    const p0 = rawPts[Math.max(0, i - 1)];
+    const p1 = rawPts[i];
+    const p2 = rawPts[i + 1];
+    const p3 = rawPts[Math.min(rawPts.length - 1, i + 2)];
+    const subPts = [p1];
+    for (let s = 1; s <= NUM_SUB; s++) {
+      const t = s / NUM_SUB;
+      const t2 = t * t, t3 = t2 * t;
+      const lat = 0.5 * (
+        (2 * p1[0]) +
+        (-p0[0] + p2[0]) * t +
+        (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
+        (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3
+      );
+      const lng = 0.5 * (
+        (2 * p1[1]) +
+        (-p0[1] + p2[1]) * t +
+        (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+        (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3
+      );
+      subPts.push([lat, lng]);
+    }
+    L.polyline(subPts, {
+      color, weight: 4, opacity: 0.8,
+      lineCap: 'round', lineJoin: 'round',
+    }).addTo(group);
   }
   return group;
 }

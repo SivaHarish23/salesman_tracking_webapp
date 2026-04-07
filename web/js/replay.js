@@ -23,15 +23,20 @@ const controls = document.getElementById('replayControls');
 const liveBadge = document.getElementById('liveBadge');
 
 let locations = [];
-let currentIndex = 0;
+let currentIndex = 0;    // float index for smooth interpolation
 let isPlaying = false;
 let playSpeed = 1;
-let playTimer = null;
+let animFrameId = null;
+let lastFrameTime = null;
 let movingMarker = null;
 let trailGroup = L.layerGroup().addTo(map);
 let checkinMarker = null;
 let isActiveSession = false;
 let livePollTimer = null;
+let smoothPoints = [];    // spline-smoothed [lat,lng] array
+let rawPts = [];          // cached [lat,lng] from locations
+let segSubCount = 8;      // sub-points per segment (must match map.js)
+let lastPanLatlng = null;  // throttle map panning
 
 // Load sessions list
 async function loadSessions() {
@@ -77,6 +82,7 @@ async function loadSessionLocations(sessionId) {
     scrubber.value = 0;
     controls.style.display = 'flex';
 
+    rebuildSmoothPoints();
     resetMap();
     renderFrame(0);
 
@@ -90,21 +96,30 @@ async function loadSessionLocations(sessionId) {
   }
 }
 
+function rebuildSmoothPoints() {
+  rawPts = locations.map(l => [l.latitude, l.longitude]);
+  smoothPoints = catmullRomSpline(rawPts, segSubCount);
+}
+
 function resetMap() {
   if (movingMarker) map.removeLayer(movingMarker);
   if (checkinMarker) map.removeLayer(checkinMarker);
   trailGroup.clearLayers();
   movingMarker = null;
   checkinMarker = null;
+  lastPanLatlng = null;
 }
 
 function renderFrame(index) {
-  if (index < 0 || index >= locations.length) return;
-  currentIndex = index;
-  scrubber.value = index;
+  if (locations.length === 0) return;
+  const maxIdx = locations.length - 1;
+  const idx = Math.max(0, Math.min(index, maxIdx));
+  currentIndex = idx;
+  scrubber.value = Math.round(idx);
 
-  const loc = locations[index];
-  const latlng = [loc.latitude, loc.longitude];
+  // Map float location-index to float smooth-point-index
+  const smoothIdx = idx * segSubCount;
+  const latlng = interpolateOnPath(smoothPoints, smoothIdx);
 
   // Update or create moving marker
   if (movingMarker) {
@@ -121,29 +136,75 @@ function renderFrame(index) {
     ).addTo(map);
   }
 
-  // Rebuild trail up to current index (speed-colored)
+  // Rebuild smooth trail up to current position (speed-colored)
   trailGroup.clearLayers();
-  for (let i = 0; i < index; i++) {
+  const floorIdx = Math.floor(idx);
+  // Draw full smooth segments for completed original segments
+  for (let i = 0; i < floorIdx && i < locations.length - 1; i++) {
     const a = locations[i], b = locations[i + 1];
     const dist = haversineDistance(a.latitude, a.longitude, b.latitude, b.longitude);
     const dt = (new Date(b.recorded_at) - new Date(a.recorded_at)) / 1000;
     const kmh = dt > 0 ? (dist / dt) * 3.6 : 0;
-    L.polyline(
-      [[a.latitude, a.longitude], [b.latitude, b.longitude]],
-      { color: speedColor(kmh), weight: 4, opacity: 0.8 }
-    ).addTo(trailGroup);
+    const color = speedColor(kmh);
+    const p0 = rawPts[Math.max(0, i - 1)];
+    const p1 = rawPts[i];
+    const p2 = rawPts[i + 1];
+    const p3 = rawPts[Math.min(rawPts.length - 1, i + 2)];
+    const subPts = [p1];
+    for (let s = 1; s <= segSubCount; s++) {
+      const t = s / segSubCount;
+      const t2 = t * t, t3 = t2 * t;
+      subPts.push([
+        0.5 * ((2*p1[0]) + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3),
+        0.5 * ((2*p1[1]) + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
+      ]);
+    }
+    L.polyline(subPts, { color, weight: 4, opacity: 0.8, lineCap: 'round', lineJoin: 'round' }).addTo(trailGroup);
+  }
+  // Draw partial smooth segment for the fractional part
+  if (floorIdx < locations.length - 1) {
+    const frac = idx - floorIdx;
+    if (frac > 0.001) {
+      const i = floorIdx;
+      const a = locations[i], b = locations[i + 1];
+      const dist = haversineDistance(a.latitude, a.longitude, b.latitude, b.longitude);
+      const dt = (new Date(b.recorded_at) - new Date(a.recorded_at)) / 1000;
+      const kmh = dt > 0 ? (dist / dt) * 3.6 : 0;
+      const color = speedColor(kmh);
+      const p0 = rawPts[Math.max(0, i - 1)];
+      const p1 = rawPts[i];
+      const p2 = rawPts[i + 1];
+      const p3 = rawPts[Math.min(rawPts.length - 1, i + 2)];
+      const subSteps = Math.ceil(frac * segSubCount);
+      const subPts = [p1];
+      for (let s = 1; s <= subSteps; s++) {
+        const t = s / segSubCount;
+        const t2 = t * t, t3 = t2 * t;
+        subPts.push([
+          0.5 * ((2*p1[0]) + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3),
+          0.5 * ((2*p1[1]) + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
+        ]);
+      }
+      subPts.push(latlng); // extend trail to exact marker position
+      L.polyline(subPts, { color, weight: 4, opacity: 0.8, lineCap: 'round', lineJoin: 'round' }).addTo(trailGroup);
+    }
   }
 
-  // Update time display
+  // Update time display using nearest integer location
+  const nearIdx = Math.min(Math.round(idx), maxIdx);
+  const loc = locations[nearIdx];
   timeDisplay.textContent = toIST(loc.recorded_at);
 
-  // Pan map to follow marker
-  map.panTo(latlng, { animate: true, duration: 0.3 });
+  // Throttled map pan — only when marker moves >50px on screen
+  if (!lastPanLatlng || map.latLngToContainerPoint(latlng).distanceTo(map.latLngToContainerPoint(lastPanLatlng)) > 50) {
+    map.panTo(latlng, { animate: true, duration: 0.3 });
+    lastPanLatlng = latlng;
+  }
 
   // Update popup
   const batt = loc.battery_pct != null ? ` | Battery: ${loc.battery_pct}%` : '';
   movingMarker.bindPopup(
-    `<b>Point ${index + 1}/${locations.length}</b><br>${toIST(loc.recorded_at)}${batt}`
+    `<b>Point ${nearIdx + 1}/${locations.length}</b><br>${toIST(loc.recorded_at)}${batt}`
   );
 }
 
@@ -160,31 +221,48 @@ function startPlayback() {
   if (locations.length === 0) return;
   if (currentIndex >= locations.length - 1) currentIndex = 0;
   isPlaying = true;
+  lastFrameTime = null;
   playBtn.innerHTML = '&#9646;&#9646;';
-  scheduleNextFrame();
+  animFrameId = requestAnimationFrame(animateLoop);
 }
 
 function stopPlayback() {
   isPlaying = false;
   playBtn.innerHTML = '&#9654;';
-  clearTimeout(playTimer);
-  playTimer = null;
+  if (animFrameId) cancelAnimationFrame(animFrameId);
+  animFrameId = null;
+  lastFrameTime = null;
 }
 
-function scheduleNextFrame() {
+function animateLoop(timestamp) {
   if (!isPlaying || currentIndex >= locations.length - 1) {
     stopPlayback();
     return;
   }
-  const a = locations[currentIndex];
-  const b = locations[currentIndex + 1];
-  const realGapMs = new Date(b.recorded_at) - new Date(a.recorded_at);
-  const delay = Math.max(50, Math.min(2000, realGapMs / playSpeed));
-  playTimer = setTimeout(() => {
-    currentIndex++;
-    renderFrame(currentIndex);
-    scheduleNextFrame();
-  }, delay);
+  if (!lastFrameTime) {
+    lastFrameTime = timestamp;
+    animFrameId = requestAnimationFrame(animateLoop);
+    return;
+  }
+  const dtMs = timestamp - lastFrameTime;
+  lastFrameTime = timestamp;
+
+  // Calculate how far to advance based on the real gap between current pair of points
+  const floorIdx = Math.floor(currentIndex);
+  const a = locations[floorIdx];
+  const b = locations[Math.min(floorIdx + 1, locations.length - 1)];
+  const realGapMs = Math.max(100, new Date(b.recorded_at) - new Date(a.recorded_at));
+  // Advance as a fraction of the gap, scaled by playback speed
+  const advance = (dtMs * playSpeed) / realGapMs;
+  currentIndex = Math.min(currentIndex + advance, locations.length - 1);
+
+  renderFrame(currentIndex);
+
+  if (currentIndex >= locations.length - 1) {
+    stopPlayback();
+  } else {
+    animFrameId = requestAnimationFrame(animateLoop);
+  }
 }
 
 // Speed buttons
@@ -193,10 +271,7 @@ document.querySelectorAll('.speed-btn').forEach(btn => {
     document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     playSpeed = parseInt(btn.dataset.speed);
-    if (isPlaying) {
-      clearTimeout(playTimer);
-      scheduleNextFrame();
-    }
+    // rAF loop automatically picks up the new playSpeed, no restart needed
   });
 });
 
@@ -204,7 +279,9 @@ document.querySelectorAll('.speed-btn').forEach(btn => {
 scrubber.addEventListener('input', () => {
   const wasPlaying = isPlaying;
   if (isPlaying) stopPlayback();
-  renderFrame(parseInt(scrubber.value));
+  currentIndex = parseInt(scrubber.value);
+  lastPanLatlng = null; // reset pan throttle on manual scrub
+  renderFrame(currentIndex);
   if (wasPlaying) startPlayback();
 });
 
@@ -218,6 +295,7 @@ function startLivePoll(sessionId) {
       if (newLocs.length > locations.length) {
         const wasAtEnd = currentIndex >= locations.length - 1;
         locations = newLocs;
+        rebuildSmoothPoints();
         scrubber.max = locations.length - 1;
         if (wasAtEnd && !isPlaying) {
           renderFrame(locations.length - 1);

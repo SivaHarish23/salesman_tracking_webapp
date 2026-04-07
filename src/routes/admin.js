@@ -26,14 +26,14 @@ const USERS_QUERY = `
 
 const LIVE_LOCATIONS_QUERY = `
   SELECT DISTINCT ON (ll.user_id)
-         ll.user_id, u.username, ll.latitude, ll.longitude, ll.recorded_at
+         ll.user_id, u.username, ll.latitude, ll.longitude, ll.recorded_at, ll.battery_pct
   FROM location_logs ll
   JOIN users u ON u.id = ll.user_id
   WHERE u.is_active = true
   ORDER BY ll.user_id, ll.recorded_at DESC`;
 
 const SESSION_LOCATIONS_QUERY =
-  'SELECT latitude, longitude, recorded_at FROM location_logs WHERE session_id = $1 ORDER BY recorded_at ASC';
+  'SELECT latitude, longitude, recorded_at, battery_pct FROM location_logs WHERE session_id = $1 ORDER BY recorded_at ASC';
 
 async function fetchUserSession(userId, sessionId) {
   let sessionQuery;
@@ -141,6 +141,32 @@ router.get('/users/:id/session', async (req, res) => {
     res.json(data);
   } catch (err) {
     console.error('User session error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// List sessions for a user (for replay feature)
+router.get('/users/:id/sessions', async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id);
+    if (isNaN(userId) || userId <= 0) {
+      return res.status(400).json({ error: 'Invalid user ID' });
+    }
+
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+    const result = await pool.query(
+      `SELECT s.id, s.checkin_time, s.checkout_time, s.is_active,
+              s.device_platform, s.device_model, s.os_version,
+              (SELECT COUNT(*) FROM location_logs WHERE session_id = s.id) AS point_count
+       FROM sessions s
+       WHERE s.user_id = $1
+       ORDER BY s.checkin_time DESC
+       LIMIT $2`,
+      [userId, limit]
+    );
+    res.json({ sessions: result.rows });
+  } catch (err) {
+    console.error('User sessions error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sales Tracker - Replay</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+  <div class="replay-page">
+    <div class="replay-header">
+      <button class="back-btn" id="backBtn">&larr; Back</button>
+      <h2 id="replayTitle">Replay</h2>
+      <select id="sessionSelect" class="replay-select">
+        <option value="">Select session...</option>
+      </select>
+      <span class="live-badge" id="liveBadge" style="display:none;">LIVE</span>
+    </div>
+    <div id="replay-map" style="flex:1;width:100%;"></div>
+    <div class="replay-controls" id="replayControls" style="display:none;">
+      <button class="play-btn" id="playBtn" title="Play/Pause">&#9654;</button>
+      <div class="speed-buttons">
+        <button class="speed-btn active" data-speed="1">1x</button>
+        <button class="speed-btn" data-speed="2">2x</button>
+        <button class="speed-btn" data-speed="4">4x</button>
+        <button class="speed-btn" data-speed="8">8x</button>
+      </div>
+      <input type="range" class="timeline-scrubber" id="scrubber" min="0" max="0" value="0">
+      <span class="time-display" id="timeDisplay">--:--:--</span>
+    </div>
+  </div>
+  <script src="/js/api.js"></script>
+  <script src="/js/map.js"></script>
+  <script src="/js/replay.js"></script>
+</body>
+</html>

@@ -25,7 +25,7 @@ function validateCoords(latitude, longitude) {
 router.post('/checkin', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { latitude, longitude } = req.body;
+    const { latitude, longitude, device_platform, device_model, os_version, app_version } = req.body;
     const coordError = validateCoords(latitude, longitude);
     if (coordError) return res.status(400).json({ error: coordError });
 
@@ -42,11 +42,17 @@ router.post('/checkin', async (req, res) => {
       return res.status(409).json({ error: 'Already checked in. Check out first.' });
     }
 
-    // Create session
+    // Create session with device info
     const sessionResult = await client.query(
-      `INSERT INTO sessions (user_id, checkin_lat, checkin_lng)
-       VALUES ($1, $2, $3) RETURNING *`,
-      [req.user.userId, latitude, longitude]
+      `INSERT INTO sessions (user_id, checkin_lat, checkin_lng, device_platform, device_model, os_version, app_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [
+        req.user.userId, latitude, longitude,
+        (device_platform || '').slice(0, 10) || null,
+        (device_model || '').slice(0, 100) || null,
+        (os_version || '').slice(0, 50) || null,
+        (app_version || '').slice(0, 20) || null,
+      ]
     );
     const session = sessionResult.rows[0];
 
@@ -218,7 +224,14 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
         continue;
       }
 
-      validPoints.push({ uid, latitude: lat, longitude: lng, ts });
+      // Validate battery_pct (optional, 0-100)
+      let battery = null;
+      if (pt.battery_pct != null) {
+        const b = parseInt(pt.battery_pct);
+        if (!isNaN(b) && b >= 0 && b <= 100) battery = b;
+      }
+
+      validPoints.push({ uid, latitude: lat, longitude: lng, ts, battery });
     }
     console.log(`[BATCH] user=${req.user.userId}: ${validPoints.length}/${points.length} valid, rejections:`, rejections);
 
@@ -227,13 +240,13 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
     const insertErrors = [];
     if (validPoints.length > 0) {
       await client.query('BEGIN');
-      for (const { uid, latitude, longitude, ts } of validPoints) {
+      for (const { uid, latitude, longitude, ts, battery } of validPoints) {
         try {
           await client.query(
-            `INSERT INTO location_logs (session_id, user_id, latitude, longitude, recorded_at, uid)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            `INSERT INTO location_logs (session_id, user_id, latitude, longitude, recorded_at, uid, battery_pct)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (uid) WHERE uid IS NOT NULL DO NOTHING`,
-            [sessionId, req.user.userId, latitude, longitude, ts.toISOString(), uid]
+            [sessionId, req.user.userId, latitude, longitude, ts.toISOString(), uid, battery]
           );
           inserted++;
         } catch (e) {
@@ -253,7 +266,31 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
   }
 });
 
-// Get current active session with route
+// Get past sessions for current user (session history)
+router.get('/sessions/history', async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+    const offset = (page - 1) * limit;
+
+    const result = await pool.query(
+      `SELECT s.id, s.checkin_time, s.checkout_time, s.is_active,
+              s.device_model, s.device_platform,
+              (SELECT COUNT(*) FROM location_logs WHERE session_id = s.id) AS point_count
+       FROM sessions s
+       WHERE s.user_id = $1
+       ORDER BY s.checkin_time DESC
+       LIMIT $2 OFFSET $3`,
+      [req.user.userId, limit, offset]
+    );
+    res.json({ sessions: result.rows, page, limit });
+  } catch (err) {
+    console.error('Session history error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get current active session with route (must be before :id to avoid matching "current" as param)
 router.get('/session/current', async (req, res) => {
   try {
     const sessionResult = await pool.query(
@@ -267,13 +304,41 @@ router.get('/session/current', async (req, res) => {
 
     const session = sessionResult.rows[0];
     const locations = await pool.query(
-      'SELECT latitude, longitude, recorded_at FROM location_logs WHERE session_id = $1 ORDER BY recorded_at ASC',
+      'SELECT latitude, longitude, recorded_at, battery_pct FROM location_logs WHERE session_id = $1 ORDER BY recorded_at ASC',
       [session.id]
     );
 
     res.json({ session, locations: locations.rows });
   } catch (err) {
     console.error('Session error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get specific session with locations (owned by current user)
+router.get('/session/:id', async (req, res) => {
+  try {
+    const sessionId = parseInt(req.params.id);
+    if (isNaN(sessionId) || sessionId <= 0) {
+      return res.status(400).json({ error: 'Invalid session ID' });
+    }
+
+    const sessionResult = await pool.query(
+      'SELECT * FROM sessions WHERE id = $1 AND user_id = $2',
+      [sessionId, req.user.userId]
+    );
+    if (sessionResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const session = sessionResult.rows[0];
+    const locations = await pool.query(
+      'SELECT latitude, longitude, recorded_at, battery_pct FROM location_logs WHERE session_id = $1 ORDER BY recorded_at ASC',
+      [session.id]
+    );
+    res.json({ session, locations: locations.rows });
+  } catch (err) {
+    console.error('Session detail error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });

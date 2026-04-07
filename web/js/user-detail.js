@@ -14,6 +14,10 @@ if (!userId || isNaN(parseInt(userId))) {
 
 document.getElementById('userName').textContent = userName || 'Salesman';
 
+document.getElementById('replayBtn').addEventListener('click', () => {
+  window.location.href = `/replay.html?user_id=${encodeURIComponent(userId)}&name=${encodeURIComponent(userName)}`;
+});
+
 const map = createMap('detail-map', [20, 78], 5);
 let checkinMarker, checkoutMarker, currentMarker, routeLine;
 let pollInterval;
@@ -53,14 +57,21 @@ function renderSession(data) {
     return;
   }
 
-  const checkinTime = new Date(session.checkin_time).toLocaleString();
+  const checkinTime = toIST(session.checkin_time);
   const checkoutTime = session.checkout_time
-    ? new Date(session.checkout_time).toLocaleString()
+    ? toIST(session.checkout_time)
     : 'In progress...';
+  const lastBattery = locations.length > 0 ? locations[locations.length - 1].battery_pct : null;
+  const batteryHtml = lastBattery != null ? `<span><b>Battery:</b> ${lastBattery}%</span>` : '';
+  const deviceParts = [session.device_model, session.os_version].filter(Boolean);
+  const deviceHtml = deviceParts.length > 0
+    ? `<span><b>Device:</b> ${esc(deviceParts.join(' \u00b7 '))}</span>` : '';
   infoEl.innerHTML = `
     <span><b>Check-in:</b> ${esc(checkinTime)}</span>
     <span><b>Check-out:</b> ${esc(checkoutTime)}</span>
     <span><b>Points:</b> ${locations.length}</span>
+    ${batteryHtml}
+    ${deviceHtml}
   `;
 
   // Clear old layers
@@ -81,10 +92,12 @@ function renderSession(data) {
 
   // Current location marker (last point)
   const lastPoint = points[points.length - 1];
-  const lastTime = new Date(locations[locations.length - 1].recorded_at).toLocaleTimeString();
+  const lastLoc = locations[locations.length - 1];
+  const lastTime = toISTTime(lastLoc.recorded_at);
+  const lastBatt = lastLoc.battery_pct != null ? `<br>Battery: ${lastLoc.battery_pct}%` : '';
   currentMarker = L.marker(lastPoint, { icon: createPulsingIcon(COLORS.current) })
     .addTo(map)
-    .bindPopup(`<b>Current</b><br>Updated: ${esc(lastTime)}`);
+    .bindPopup(`<b>Current</b><br>Updated: ${esc(lastTime)}${lastBatt}`);
 
   // Check-out marker if session is ended
   if (session.checkout_lat != null && session.checkout_lng != null) {
@@ -92,16 +105,29 @@ function renderSession(data) {
       icon: createIcon(COLORS.checkout),
     })
       .addTo(map)
-      .bindPopup(`<b>Check-out</b><br>${esc(new Date(session.checkout_time).toLocaleString())}`);
+      .bindPopup(`<b>Check-out</b><br>${esc(toIST(session.checkout_time))}`);
   }
 
-  // Route polyline
-  if (points.length > 1) {
-    routeLine = L.polyline(points, {
-      color: COLORS.route,
-      weight: 4,
-      opacity: 0.7,
-    }).addTo(map);
+  // Speed-colored route segments
+  if (locations.length > 1) {
+    routeLine = createSpeedPolyline(locations);
+    routeLine.addTo(map);
+  }
+
+  // Low battery warning banner
+  let batteryBanner = document.getElementById('batteryWarning');
+  if (!batteryBanner) {
+    batteryBanner = document.createElement('div');
+    batteryBanner.id = 'batteryWarning';
+    batteryBanner.className = 'battery-warning-banner';
+    const infoEl2 = document.getElementById('sessionInfo');
+    infoEl2.parentNode.insertBefore(batteryBanner, infoEl2.nextSibling);
+  }
+  if (lastBattery != null && lastBattery <= 15) {
+    batteryBanner.style.display = 'flex';
+    batteryBanner.innerHTML = `\u26A0\uFE0F <b>Low Battery Warning:</b>&nbsp;Device battery is at ${lastBattery}%`;
+  } else {
+    batteryBanner.style.display = 'none';
   }
 
   // Fit map to show all points

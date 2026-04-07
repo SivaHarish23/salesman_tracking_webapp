@@ -27,6 +27,14 @@ function setUser(user) {
   localStorage.setItem('user', JSON.stringify(user));
 }
 
+// Format date/time in IST (Asia/Kolkata)
+function toIST(dateVal) {
+  return new Date(dateVal).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+}
+function toISTTime(dateVal) {
+  return new Date(dateVal).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' });
+}
+
 // HTML-escape to prevent XSS
 function esc(str) {
   const div = document.createElement('div');

@@ -117,17 +117,22 @@ function createSpeedPolyline(locations) {
   if (locations.length < 2) return group;
 
   const rawPts = locations.map(l => [l.latitude, l.longitude]);
-  const NUM_SUB = 8; // interpolated sub-points per segment
+  const NUM_SUB = 8;
 
-  // Build smoothed sub-points for each original segment, colored by speed
+  // 1. Single continuous glow layer (no segment seams)
+  const fullSmooth = catmullRomSpline(rawPts, NUM_SUB);
+  L.polyline(fullSmooth, {
+    color: '#4285f4', weight: 14, opacity: 0.2,
+    lineCap: 'round', lineJoin: 'round',
+  }).addTo(group);
+
+  // 2. Speed-colored segments on top — butt caps eliminate dots at junctions
   for (let i = 0; i < locations.length - 1; i++) {
     const a = locations[i], b = locations[i + 1];
     const dist = haversineDistance(a.latitude, a.longitude, b.latitude, b.longitude);
     const dt = (new Date(b.recorded_at) - new Date(a.recorded_at)) / 1000;
     const kmh = dt > 0 ? (dist / dt) * 3.6 : 0;
     const color = speedColor(kmh);
-
-    // Get the 4 control points for this segment's spline
     const p0 = rawPts[Math.max(0, i - 1)];
     const p1 = rawPts[i];
     const p2 = rawPts[i + 1];
@@ -136,23 +141,14 @@ function createSpeedPolyline(locations) {
     for (let s = 1; s <= NUM_SUB; s++) {
       const t = s / NUM_SUB;
       const t2 = t * t, t3 = t2 * t;
-      const lat = 0.5 * (
-        (2 * p1[0]) +
-        (-p0[0] + p2[0]) * t +
-        (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
-        (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3
-      );
-      const lng = 0.5 * (
-        (2 * p1[1]) +
-        (-p0[1] + p2[1]) * t +
-        (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
-        (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3
-      );
-      subPts.push([lat, lng]);
+      subPts.push([
+        0.5 * ((2*p1[0]) + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3),
+        0.5 * ((2*p1[1]) + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
+      ]);
     }
     L.polyline(subPts, {
-      color, weight: 4, opacity: 0.8,
-      lineCap: 'round', lineJoin: 'round',
+      color, weight: 5, opacity: 0.9,
+      lineCap: 'butt', lineJoin: 'round',
     }).addTo(group);
   }
   return group;

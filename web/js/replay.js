@@ -136,10 +136,27 @@ function renderFrame(index) {
     ).addTo(map);
   }
 
-  // Rebuild smooth trail up to current position (speed-colored)
+  // Rebuild smooth trail up to current position
   trailGroup.clearLayers();
   const floorIdx = Math.floor(idx);
-  // Draw full smooth segments for completed original segments
+
+  // 1. Continuous glow trail up to current marker position
+  if (floorIdx > 0 || (idx - floorIdx) > 0.001) {
+    const trailEnd = Math.min(Math.ceil(idx), locations.length - 1);
+    const glowPts = rawPts.slice(0, trailEnd + 1);
+    if (glowPts.length >= 2) {
+      const smoothGlow = catmullRomSpline(glowPts, segSubCount);
+      const trimAt = Math.min(Math.ceil(idx * segSubCount) + 1, smoothGlow.length);
+      const trimmed = smoothGlow.slice(0, trimAt);
+      trimmed.push(latlng);
+      L.polyline(trimmed, {
+        color: '#4285f4', weight: 14, opacity: 0.2,
+        lineCap: 'round', lineJoin: 'round',
+      }).addTo(trailGroup);
+    }
+  }
+
+  // 2. Speed-colored segments on top — butt caps = no dots at junctions
   for (let i = 0; i < floorIdx && i < locations.length - 1; i++) {
     const a = locations[i], b = locations[i + 1];
     const dist = haversineDistance(a.latitude, a.longitude, b.latitude, b.longitude);
@@ -159,9 +176,9 @@ function renderFrame(index) {
         0.5 * ((2*p1[1]) + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
       ]);
     }
-    L.polyline(subPts, { color, weight: 4, opacity: 0.8, lineCap: 'round', lineJoin: 'round' }).addTo(trailGroup);
+    L.polyline(subPts, { color, weight: 5, opacity: 0.9, lineCap: 'butt', lineJoin: 'round' }).addTo(trailGroup);
   }
-  // Draw partial smooth segment for the fractional part
+  // Partial segment for fractional part
   if (floorIdx < locations.length - 1) {
     const frac = idx - floorIdx;
     if (frac > 0.001) {
@@ -185,8 +202,8 @@ function renderFrame(index) {
           0.5 * ((2*p1[1]) + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
         ]);
       }
-      subPts.push(latlng); // extend trail to exact marker position
-      L.polyline(subPts, { color, weight: 4, opacity: 0.8, lineCap: 'round', lineJoin: 'round' }).addTo(trailGroup);
+      subPts.push(latlng);
+      L.polyline(subPts, { color, weight: 5, opacity: 0.9, lineCap: 'butt', lineJoin: 'round' }).addTo(trailGroup);
     }
   }
 

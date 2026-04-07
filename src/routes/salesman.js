@@ -232,7 +232,7 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
           await client.query(
             `INSERT INTO location_logs (session_id, user_id, latitude, longitude, recorded_at, uid)
              VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (uid) DO NOTHING`,
+             ON CONFLICT (uid) WHERE uid IS NOT NULL DO NOTHING`,
             [sessionId, req.user.userId, latitude, longitude, ts.toISOString(), uid]
           );
           inserted++;

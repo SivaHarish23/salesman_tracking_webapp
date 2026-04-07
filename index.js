@@ -27,6 +27,28 @@ const corsOptions = process.env.CORS_ORIGIN
 app.use(cors(corsOptions));
 app.use(express.json());
 
+// Structured request logging
+app.use((req, res, next) => {
+  const start = Date.now();
+  const originalEnd = res.end;
+  res.end = function (...args) {
+    const log = {
+      ts: Date.now(),
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      ms: Date.now() - start,
+      userId: req.user?.userId || null,
+    };
+    // Skip health checks and SSE streams from verbose logging
+    if (req.path !== '/api/health' && !req.path.endsWith('/stream')) {
+      console.log(JSON.stringify(log));
+    }
+    originalEnd.apply(res, args);
+  };
+  next();
+});
+
 // API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
@@ -63,8 +85,9 @@ app.use((err, req, res, next) => {
 // ---------------------------------------------------------------------------
 async function cleanupStaleSessions() {
   try {
+    // Use checkin coords as checkout coords for stale sessions (satisfies chk_checkout_coords constraint)
     const result = await pool.query(
-      `UPDATE sessions SET checkout_time = NOW(), is_active = false
+      `UPDATE sessions SET checkout_time = NOW(), checkout_lat = checkin_lat, checkout_lng = checkin_lng, is_active = false
        WHERE is_active = true
          AND checkin_time < NOW() - INTERVAL '${STALE_SESSION_HOURS} hours'
        RETURNING user_id`

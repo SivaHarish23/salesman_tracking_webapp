@@ -19,11 +19,11 @@ const locationLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Stricter limiter for batch endpoint: each request can carry up to 100 points,
-// so 5 req/min × 100 pts = 500 points/min max (vs previous 1000/min)
+// Batch limiter: 12 req/min allows 15s sync interval with burst headroom
+// 12 req/min × 100 pts = 1200 points/min max
 const batchLocationLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 5,
+  max: 12,
   keyGenerator: (req) => `batch_${req.user?.userId || req.ip}`,
   message: { error: 'Batch upload too frequent' },
   standardHeaders: true,

@@ -240,3 +240,143 @@ body {
   height: 12px;
   border-radius: 50%;
 }
+
+/* Battery Warning */
+.battery-warn {
+  font-size: 14px;
+  cursor: help;
+}
+
+.battery-warning-banner {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: #fce8e6;
+  color: #d93025;
+  border-bottom: 1px solid #f5c6cb;
+  font-size: 14px;
+}
+
+/* Replay Button (user-detail header) */
+.replay-btn {
+  background: #1a73e8;
+  color: #fff;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.replay-btn:hover {
+  background: #1557b0;
+}
+
+/* Replay Page */
+.replay-page {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.replay-header {
+  padding: 16px 20px;
+  background: #fff;
+  border-bottom: 1px solid #e0e0e0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.replay-header h2 {
+  font-size: 18px;
+  white-space: nowrap;
+}
+
+.replay-select {
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+  min-width: 280px;
+}
+
+.replay-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  background: #fff;
+  border-top: 1px solid #e0e0e0;
+}
+
+.play-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: #1a73e8;
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.play-btn:hover {
+  background: #1557b0;
+}
+
+.speed-buttons {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.speed-btn {
+  padding: 4px 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.speed-btn.active {
+  background: #1a73e8;
+  color: #fff;
+  border-color: #1a73e8;
+}
+
+.timeline-scrubber {
+  flex: 1;
+  min-width: 100px;
+}
+
+.time-display {
+  font-size: 13px;
+  color: #555;
+  white-space: nowrap;
+  min-width: 160px;
+  text-align: right;
+}
+
+.live-badge {
+  background: #d93025;
+  color: #fff;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  animation: pulse-badge 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-badge {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}

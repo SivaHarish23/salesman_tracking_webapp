@@ -1,8 +1,10 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
 const { loginLimiter } = require('../middleware/rateLimit');
+const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -61,11 +63,28 @@ router.post('/login', loginLimiter, async (req, res) => {
 
     console.log(`[AUTH] Login success: userId=${user.id}, role=${user.role}, forceCheckout=${forceCheckout}`);
 
-    const token = jwt.sign(
-      { userId: user.id, username: user.username, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
+    let token;
+    if (user.role === 'admin') {
+      // Admin (web dashboard): short-lived JWT — stateless, works with SSE query params
+      token = jwt.sign(
+        { userId: user.id, username: user.username, role: user.role },
+        process.env.JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+    } else {
+      // Salesman (mobile): persistent device token — revoke all old tokens on new login
+      await pool.query(
+        'UPDATE device_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL',
+        [user.id]
+      );
+      token = crypto.randomBytes(32).toString('hex');
+      const { device_platform, device_model } = req.body;
+      await pool.query(
+        `INSERT INTO device_tokens (user_id, token, device_platform, device_model)
+         VALUES ($1, $2, $3, $4)`,
+        [user.id, token, device_platform || null, device_model || null]
+      );
+    }
 
     res.json({
       token,
@@ -74,6 +93,17 @@ router.post('/login', loginLimiter, async (req, res) => {
     });
   } catch (err) {
     console.error('Login error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Logout: delete the device token used in this request
+router.post('/logout', authenticate, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM device_tokens WHERE token = $1', [req.deviceToken]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Logout error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });

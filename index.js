@@ -100,6 +100,14 @@ async function cleanupStaleSessions() {
       );
       console.log(`Cleaned up ${result.rows.length} stale session(s)`);
     }
+
+    // Purge device tokens whose grace period has expired
+    const purged = await pool.query(
+      `DELETE FROM device_tokens WHERE revoked_at < NOW() - INTERVAL '24 hours' RETURNING id`
+    );
+    if (purged.rows.length > 0) {
+      console.log(`Purged ${purged.rows.length} expired device token(s)`);
+    }
   } catch (err) {
     console.error('Stale session cleanup error:', err.message);
   }

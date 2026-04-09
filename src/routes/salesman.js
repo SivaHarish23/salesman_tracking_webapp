@@ -6,6 +6,14 @@ const { locationLimiter, batchLocationLimiter } = require('../middleware/rateLim
 const router = express.Router();
 router.use(authenticate, requireRole('salesman'));
 
+// Block revoked tokens from all endpoints except POST /location/batch
+router.use((req, res, next) => {
+  if (req.tokenRevoked && !(req.method === 'POST' && req.path === '/location/batch')) {
+    return res.status(401).json({ error: 'Token revoked. Please log in again.' });
+  }
+  next();
+});
+
 const MAX_BATCH_SIZE = 100;
 const MAX_POINT_AGE_MS = 24 * 60 * 60 * 1000;
 const FUTURE_TOLERANCE_MS = 60000;
@@ -175,10 +183,31 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
       'SELECT id FROM sessions WHERE user_id = $1 AND is_active = true',
       [req.user.userId]
     );
-    if (session.rows.length === 0) {
+
+    let sessionId;
+    let sessionCheckinTime = null;
+    let sessionCheckoutTime = null;
+
+    if (session.rows.length > 0) {
+      sessionId = session.rows[0].id;
+    } else if (req.tokenRevoked) {
+      // Revoked token grace period: allow sync into the last closed session
+      const closedSession = await client.query(
+        `SELECT id, checkin_time, checkout_time FROM sessions
+         WHERE user_id = $1 AND is_active = false
+         ORDER BY checkout_time DESC LIMIT 1`,
+        [req.user.userId]
+      );
+      if (closedSession.rows.length > 0) {
+        sessionId = closedSession.rows[0].id;
+        sessionCheckinTime = new Date(closedSession.rows[0].checkin_time);
+        sessionCheckoutTime = new Date(closedSession.rows[0].checkout_time);
+      } else {
+        return res.status(409).json({ error: 'No session found.' });
+      }
+    } else {
       return res.status(409).json({ error: 'No active session. Check in first.' });
     }
-    const sessionId = session.rows[0].id;
 
     const now = new Date();
 
@@ -224,6 +253,14 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
         continue;
       }
 
+      // For closed-session sync (revoked token): only accept points within session time range
+      if (sessionCheckoutTime) {
+        if (ts < sessionCheckinTime || ts > sessionCheckoutTime) {
+          rejections.push({ uid, reason: 'outside_session_range' });
+          continue;
+        }
+      }
+
       // Validate battery_pct (optional, 0-100)
       let battery = null;
       if (pt.battery_pct != null) {
@@ -235,21 +272,27 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
     }
     console.log(`[BATCH] user=${req.user.userId}: ${validPoints.length}/${points.length} valid, rejections:`, rejections);
 
-    // Insert all valid points in a single transaction
+    // Insert all valid points in a single transaction (use SAVEPOINTs to
+    // prevent a single row failure from aborting the entire batch)
     let inserted = 0;
     const insertErrors = [];
     if (validPoints.length > 0) {
       await client.query('BEGIN');
-      for (const { uid, latitude, longitude, ts, battery } of validPoints) {
+      for (let i = 0; i < validPoints.length; i++) {
+        const { uid, latitude, longitude, ts, battery } = validPoints[i];
+        const sp = `sp_${i}`;
         try {
+          await client.query(`SAVEPOINT ${sp}`);
           await client.query(
             `INSERT INTO location_logs (session_id, user_id, latitude, longitude, recorded_at, uid, battery_pct)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (uid) WHERE uid IS NOT NULL DO NOTHING`,
             [sessionId, req.user.userId, latitude, longitude, ts.toISOString(), uid, battery]
           );
+          await client.query(`RELEASE SAVEPOINT ${sp}`);
           inserted++;
         } catch (e) {
+          await client.query(`ROLLBACK TO SAVEPOINT ${sp}`).catch(() => {});
           insertErrors.push({ uid, error: e.message });
         }
       }

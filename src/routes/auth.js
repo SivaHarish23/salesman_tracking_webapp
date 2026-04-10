@@ -1,6 +1,5 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
 const { loginLimiter } = require('../middleware/rateLimit');
@@ -30,6 +29,7 @@ router.post('/login', loginLimiter, async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    // Force-checkout any active session (auto-checkout on login from another device)
     let forceCheckout = false;
     try {
       const activeSession = await pool.query(
@@ -58,26 +58,12 @@ router.post('/login', loginLimiter, async (req, res) => {
       console.error('[AUTH] Force-checkout error:', e.message);
     }
 
-    let token;
-    if (user.role === 'admin') {
-      token = jwt.sign(
-        { userId: user.id, username: user.username, role: user.role },
-        process.env.JWT_SECRET,
-        { expiresIn: '24h' }
-      );
-    } else {
-      await pool.query(
-        'UPDATE device_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL',
-        [user.id]
-      );
-      token = crypto.randomBytes(32).toString('hex');
-      const { device_platform, device_model } = req.body;
-      await pool.query(
-        `INSERT INTO device_tokens (user_id, token, device_platform, device_model)
-         VALUES ($1, $2, $3, $4)`,
-        [user.id, token, device_platform || null, device_model || null]
-      );
-    }
+    // JWT for everyone — no DB calls needed for auth after this point
+    const token = jwt.sign(
+      { userId: user.id, username: user.username, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
 
     const ms = Date.now() - start;
     console.log(`[AUTH] Login success: userId=${user.id} role=${user.role} forceCheckout=${forceCheckout} ${ms}ms`);
@@ -93,15 +79,9 @@ router.post('/login', loginLimiter, async (req, res) => {
   }
 });
 
-router.post('/logout', authenticate, async (req, res) => {
-  try {
-    await pool.query('DELETE FROM device_tokens WHERE token = $1', [req.deviceToken]);
-    console.log(`[AUTH] Logout: userId=${req.user.userId}`);
-    res.json({ success: true });
-  } catch (err) {
-    console.error(`[AUTH] Logout error for user=${req.user.userId}:`, err.message);
-    res.status(500).json({ error: 'Server error' });
-  }
+router.post('/logout', authenticate, (req, res) => {
+  console.log(`[AUTH] Logout: userId=${req.user.userId}`);
+  res.json({ success: true });
 });
 
 module.exports = router;

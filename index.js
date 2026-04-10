@@ -133,12 +133,6 @@ async function cleanupStaleSessions() {
       console.log(`[CLEANUP] Cleaned up ${result.rows.length} stale session(s) in ${Date.now() - start}ms`);
     }
 
-    const purged = await pool.query(
-      `DELETE FROM device_tokens WHERE revoked_at < NOW() - INTERVAL '24 hours' RETURNING id`
-    );
-    if (purged.rows.length > 0) {
-      console.log(`[CLEANUP] Purged ${purged.rows.length} expired device token(s)`);
-    }
   } catch (err) {
     console.error(`[CLEANUP] Error after ${Date.now() - start}ms:`, err.message);
   }

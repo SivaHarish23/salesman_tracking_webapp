@@ -6,14 +6,6 @@ const { locationLimiter, batchLocationLimiter } = require('../middleware/rateLim
 const router = express.Router();
 router.use(authenticate, requireRole('salesman'));
 
-// Block revoked tokens from all endpoints except POST /location/batch
-router.use((req, res, next) => {
-  if (req.tokenRevoked && !(req.method === 'POST' && req.path === '/location/batch')) {
-    return res.status(401).json({ error: 'Token revoked. Please log in again.' });
-  }
-  next();
-});
-
 const MAX_BATCH_SIZE = 100;
 const MAX_POINT_AGE_MS = 24 * 60 * 60 * 1000;
 const FUTURE_TOLERANCE_MS = 60000;
@@ -183,33 +175,13 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
       'SELECT id FROM sessions WHERE user_id = $1 AND is_active = true',
       [req.user.userId]
     );
-
-    let sessionId;
-    let sessionCheckinTime = null;
-    let sessionCheckoutTime = null;
-
-    if (session.rows.length > 0) {
-      sessionId = session.rows[0].id;
-    } else if (req.tokenRevoked) {
-      const closedSession = await client.query(
-        `SELECT id, checkin_time, checkout_time FROM sessions
-         WHERE user_id = $1 AND is_active = false
-         ORDER BY checkout_time DESC LIMIT 1`,
-        [req.user.userId]
-      );
-      if (closedSession.rows.length > 0) {
-        sessionId = closedSession.rows[0].id;
-        sessionCheckinTime = new Date(closedSession.rows[0].checkin_time);
-        sessionCheckoutTime = new Date(closedSession.rows[0].checkout_time);
-      } else {
-        return res.status(409).json({ error: 'No session found.' });
-      }
-    } else {
+    if (session.rows.length === 0) {
+      client.release();
       return res.status(409).json({ error: 'No active session. Check in first.' });
     }
+    const sessionId = session.rows[0].id;
 
     const now = new Date();
-
     const validPoints = [];
     const rejections = [];
     for (const pt of points) {
@@ -246,13 +218,6 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
       } catch (e) {
         rejections.push({ uid, reason: 'date_exception', error: e.message });
         continue;
-      }
-
-      if (sessionCheckoutTime) {
-        if (ts < sessionCheckinTime || ts > sessionCheckoutTime) {
-          rejections.push({ uid, reason: 'outside_session_range' });
-          continue;
-        }
       }
 
       let battery = null;

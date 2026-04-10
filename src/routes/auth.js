@@ -3,14 +3,13 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
 const { loginLimiter } = require('../middleware/rateLimit');
-const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
 
+// Pre-hash a dummy password for constant-time comparison when user doesn't exist
 const DUMMY_HASH = bcrypt.hashSync('0000', 10);
 
 router.post('/login', loginLimiter, async (req, res) => {
-  const start = Date.now();
   try {
     const { username, password } = req.body;
     if (!username || !password) {
@@ -23,9 +22,10 @@ router.post('/login', loginLimiter, async (req, res) => {
     const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
     const user = result.rows[0];
 
+    // Always run bcrypt compare to prevent timing-based user enumeration
     const valid = await bcrypt.compare(password, user ? user.password : DUMMY_HASH);
     if (!user || !valid) {
-      console.log(`[AUTH] Login failed: username=${username} ${Date.now() - start}ms`);
+      console.log(`[AUTH] Login failed: username=${username}`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
@@ -38,6 +38,7 @@ router.post('/login', loginLimiter, async (req, res) => {
       );
       if (activeSession.rows.length > 0) {
         const session = activeSession.rows[0];
+        // Use last known location from location_logs, or fall back to checkin coords
         const lastLoc = await pool.query(
           'SELECT latitude, longitude FROM location_logs WHERE session_id = $1 ORDER BY recorded_at DESC LIMIT 1',
           [session.id]
@@ -58,15 +59,13 @@ router.post('/login', loginLimiter, async (req, res) => {
       console.error('[AUTH] Force-checkout error:', e.message);
     }
 
-    // JWT for everyone — no DB calls needed for auth after this point
+    console.log(`[AUTH] Login success: userId=${user.id}, role=${user.role}, forceCheckout=${forceCheckout}`);
+
     const token = jwt.sign(
       { userId: user.id, username: user.username, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
-
-    const ms = Date.now() - start;
-    console.log(`[AUTH] Login success: userId=${user.id} role=${user.role} forceCheckout=${forceCheckout} ${ms}ms`);
 
     res.json({
       token,
@@ -74,14 +73,9 @@ router.post('/login', loginLimiter, async (req, res) => {
       force_checkout: forceCheckout,
     });
   } catch (err) {
-    console.error(`[AUTH] Login error after ${Date.now() - start}ms:`, err.message);
+    console.error('Login error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
-});
-
-router.post('/logout', authenticate, (req, res) => {
-  console.log(`[AUTH] Logout: userId=${req.user.userId}`);
-  res.json({ success: true });
 });
 
 module.exports = router;

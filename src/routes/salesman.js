@@ -11,6 +11,7 @@ const MAX_POINT_AGE_MS = 24 * 60 * 60 * 1000;
 const FUTURE_TOLERANCE_MS = 60000;
 const MAX_UID_LENGTH = 64;
 
+// Validate lat/lng values
 function validateCoords(latitude, longitude) {
   if (latitude == null || longitude == null) return 'latitude and longitude required';
   if (typeof latitude !== 'number' || typeof longitude !== 'number') return 'latitude and longitude must be numbers';
@@ -20,20 +21,18 @@ function validateCoords(latitude, longitude) {
   return null;
 }
 
+// Check in - start a new session
 router.post('/checkin', async (req, res) => {
-  const connectStart = Date.now();
   const client = await pool.connect();
-  const connectMs = Date.now() - connectStart;
-  if (connectMs > 2000) {
-    console.warn(`[SALESMAN] Slow pool.connect for checkin: ${connectMs}ms | user=${req.user.userId}`);
-  }
   try {
     const { latitude, longitude, device_platform, device_model, os_version, app_version } = req.body;
     const coordError = validateCoords(latitude, longitude);
     if (coordError) return res.status(400).json({ error: coordError });
 
+    // Begin transaction BEFORE the check to prevent race condition
     await client.query('BEGIN');
 
+    // Lock user row to prevent concurrent checkins
     const existing = await client.query(
       'SELECT id FROM sessions WHERE user_id = $1 AND is_active = true FOR UPDATE',
       [req.user.userId]
@@ -43,6 +42,7 @@ router.post('/checkin', async (req, res) => {
       return res.status(409).json({ error: 'Already checked in. Check out first.' });
     }
 
+    // Create session with device info
     const sessionResult = await client.query(
       `INSERT INTO sessions (user_id, checkin_lat, checkin_lng, device_platform, device_model, os_version, app_version)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
@@ -56,35 +56,34 @@ router.post('/checkin', async (req, res) => {
     );
     const session = sessionResult.rows[0];
 
+    // Insert first location log
     await client.query(
       `INSERT INTO location_logs (session_id, user_id, latitude, longitude)
        VALUES ($1, $2, $3, $4)`,
       [session.id, req.user.userId, latitude, longitude]
     );
 
+    // Mark user as active
     await client.query('UPDATE users SET is_active = true WHERE id = $1', [req.user.userId]);
 
     await client.query('COMMIT');
     res.json({ session });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
+    // Handle unique constraint violation (race condition fallback)
     if (err.code === '23505' && err.constraint === 'idx_unique_active_session') {
       return res.status(409).json({ error: 'Already checked in. Check out first.' });
     }
-    console.error(`[SALESMAN] Checkin error for user=${req.user.userId}:`, err.message);
+    console.error('Checkin error:', err.message);
     res.status(500).json({ error: 'Server error' });
   } finally {
     client.release();
   }
 });
 
+// Check out - end current session
 router.post('/checkout', async (req, res) => {
-  const connectStart = Date.now();
   const client = await pool.connect();
-  const connectMs = Date.now() - connectStart;
-  if (connectMs > 2000) {
-    console.warn(`[SALESMAN] Slow pool.connect for checkout: ${connectMs}ms | user=${req.user.userId}`);
-  }
   try {
     const { latitude, longitude } = req.body;
     const coordError = validateCoords(latitude, longitude);
@@ -103,31 +102,35 @@ router.post('/checkout', async (req, res) => {
 
     const sessionId = existing.rows[0].id;
 
+    // Update session with checkout data
     const sessionResult = await client.query(
       `UPDATE sessions SET checkout_time = NOW(), checkout_lat = $1, checkout_lng = $2, is_active = false
        WHERE id = $3 RETURNING *`,
       [latitude, longitude, sessionId]
     );
 
+    // Insert final location log
     await client.query(
       `INSERT INTO location_logs (session_id, user_id, latitude, longitude)
        VALUES ($1, $2, $3, $4)`,
       [sessionId, req.user.userId, latitude, longitude]
     );
 
+    // Mark user as inactive
     await client.query('UPDATE users SET is_active = false WHERE id = $1', [req.user.userId]);
 
     await client.query('COMMIT');
     res.json({ session: sessionResult.rows[0] });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
-    console.error(`[SALESMAN] Checkout error for user=${req.user.userId}:`, err.message);
+    console.error('Checkout error:', err.message);
     res.status(500).json({ error: 'Server error' });
   } finally {
     client.release();
   }
 });
 
+// Send location update
 router.post('/location', locationLimiter, async (req, res) => {
   try {
     const { latitude, longitude } = req.body;
@@ -150,18 +153,14 @@ router.post('/location', locationLimiter, async (req, res) => {
 
     res.json({ ok: true });
   } catch (err) {
-    console.error(`[SALESMAN] Location error for user=${req.user.userId}:`, err.message);
+    console.error('Location error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
+// Batch location upload (SQLite local-first sync)
 router.post('/location/batch', batchLocationLimiter, async (req, res) => {
-  const connectStart = Date.now();
   const client = await pool.connect();
-  const connectMs = Date.now() - connectStart;
-  if (connectMs > 2000) {
-    console.warn(`[SALESMAN] Slow pool.connect for batch: ${connectMs}ms | user=${req.user.userId}`);
-  }
   try {
     const { points } = req.body;
     if (!Array.isArray(points) || points.length === 0) {
@@ -171,27 +170,31 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
       return res.status(400).json({ error: `Maximum ${MAX_BATCH_SIZE} points per batch` });
     }
 
+    // Look up active session
     const session = await client.query(
       'SELECT id FROM sessions WHERE user_id = $1 AND is_active = true',
       [req.user.userId]
     );
     if (session.rows.length === 0) {
-      client.release();
       return res.status(409).json({ error: 'No active session. Check in first.' });
     }
     const sessionId = session.rows[0].id;
 
     const now = new Date();
+
+    // Validate and collect all valid points first
     const validPoints = [];
     const rejections = [];
     for (const pt of points) {
       const { uid, latitude, longitude, recorded_at } = pt;
 
+      // Validate uid
       if (!uid || typeof uid !== 'string' || uid.length > MAX_UID_LENGTH) {
         rejections.push({ uid: uid || null, reason: 'bad_uid', type: typeof uid });
         continue;
       }
 
+      // Validate coords
       const lat = typeof latitude === 'number' ? latitude : parseFloat(latitude);
       const lng = typeof longitude === 'number' ? longitude : parseFloat(longitude);
       const coordError = validateCoords(lat, lng);
@@ -200,6 +203,7 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
         continue;
       }
 
+      // Validate recorded_at timestamp (must be within 24h and not in the future)
       let ts;
       try {
         ts = new Date(recorded_at);
@@ -220,6 +224,7 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
         continue;
       }
 
+      // Validate battery_pct (optional, 0-100)
       let battery = null;
       if (pt.battery_pct != null) {
         const b = parseInt(pt.battery_pct);
@@ -228,47 +233,40 @@ router.post('/location/batch', batchLocationLimiter, async (req, res) => {
 
       validPoints.push({ uid, latitude: lat, longitude: lng, ts, battery });
     }
+    console.log(`[BATCH] user=${req.user.userId}: ${validPoints.length}/${points.length} valid, rejections:`, rejections);
 
+    // Insert all valid points in a single transaction
     let inserted = 0;
     const insertErrors = [];
     if (validPoints.length > 0) {
       await client.query('BEGIN');
-      for (let i = 0; i < validPoints.length; i++) {
-        const { uid, latitude, longitude, ts, battery } = validPoints[i];
-        const sp = `sp_${i}`;
+      for (const { uid, latitude, longitude, ts, battery } of validPoints) {
         try {
-          await client.query(`SAVEPOINT ${sp}`);
           await client.query(
             `INSERT INTO location_logs (session_id, user_id, latitude, longitude, recorded_at, uid, battery_pct)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (uid) WHERE uid IS NOT NULL DO NOTHING`,
             [sessionId, req.user.userId, latitude, longitude, ts.toISOString(), uid, battery]
           );
-          await client.query(`RELEASE SAVEPOINT ${sp}`);
           inserted++;
         } catch (e) {
-          await client.query(`ROLLBACK TO SAVEPOINT ${sp}`).catch(() => {});
           insertErrors.push({ uid, error: e.message });
         }
       }
       await client.query('COMMIT');
     }
 
-    const totalMs = Date.now() - connectStart;
-    if (totalMs > 5000) {
-      console.warn(`[SALESMAN] Slow batch: user=${req.user.userId} points=${points.length} inserted=${inserted} ${totalMs}ms`);
-    }
-
     res.json({ ok: true, inserted, total: points.length, validated: validPoints.length, rejections, insertErrors });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
-    console.error(`[SALESMAN] Batch error for user=${req.user.userId}:`, err.message);
+    console.error('Batch location error:', err.message);
     res.status(500).json({ error: 'Server error' });
   } finally {
     client.release();
   }
 });
 
+// Get past sessions for current user (session history)
 router.get('/sessions/history', async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -278,22 +276,21 @@ router.get('/sessions/history', async (req, res) => {
     const result = await pool.query(
       `SELECT s.id, s.checkin_time, s.checkout_time, s.is_active,
               s.device_model, s.device_platform,
-              COUNT(l.id)::int AS point_count
+              (SELECT COUNT(*) FROM location_logs WHERE session_id = s.id) AS point_count
        FROM sessions s
-       LEFT JOIN location_logs l ON l.session_id = s.id
        WHERE s.user_id = $1
-       GROUP BY s.id
        ORDER BY s.checkin_time DESC
        LIMIT $2 OFFSET $3`,
       [req.user.userId, limit, offset]
     );
     res.json({ sessions: result.rows, page, limit });
   } catch (err) {
-    console.error(`[SALESMAN] Session history error for user=${req.user.userId}:`, err.message);
+    console.error('Session history error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
+// Get current active session with route (must be before :id to avoid matching "current" as param)
 router.get('/session/current', async (req, res) => {
   try {
     const sessionResult = await pool.query(
@@ -313,11 +310,12 @@ router.get('/session/current', async (req, res) => {
 
     res.json({ session, locations: locations.rows });
   } catch (err) {
-    console.error(`[SALESMAN] Current session error for user=${req.user.userId}:`, err.message);
+    console.error('Session error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
+// Get specific session with locations (owned by current user)
 router.get('/session/:id', async (req, res) => {
   try {
     const sessionId = parseInt(req.params.id);
@@ -340,7 +338,7 @@ router.get('/session/:id', async (req, res) => {
     );
     res.json({ session, locations: locations.rows });
   } catch (err) {
-    console.error(`[SALESMAN] Session detail error for user=${req.user.userId}:`, err.message);
+    console.error('Session detail error:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });

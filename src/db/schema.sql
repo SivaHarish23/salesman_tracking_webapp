@@ -45,18 +45,3 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user_active ON sessions(user_id, is_acti
 
 -- Partial unique index: dedup batch-synced points by uid (only non-NULL)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_location_logs_uid ON location_logs(uid) WHERE uid IS NOT NULL;
-
--- Device-bound auth tokens (persistent tokens for salesman mobile app)
-CREATE TABLE IF NOT EXISTS device_tokens (
-    id              SERIAL PRIMARY KEY,
-    user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    token           VARCHAR(64) UNIQUE NOT NULL,
-    device_platform VARCHAR(10),
-    device_model    VARCHAR(100),
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    last_used_at    TIMESTAMPTZ DEFAULT NOW(),
-    revoked_at      TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id) WHERE revoked_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_device_tokens_revoked ON device_tokens(revoked_at) WHERE revoked_at IS NOT NULL;

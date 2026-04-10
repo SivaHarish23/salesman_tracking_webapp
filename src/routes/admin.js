@@ -62,7 +62,15 @@ async function fetchUserSession(userId, sessionId) {
 // SSE helper
 // ---------------------------------------------------------------------------
 
+const SSE_MAX_DURATION_MS = 5 * 60 * 1000;
+const SSE_MAX_ERRORS = 5;
+let activeSseCount = 0;
+
 function setupSSE(req, res, fetchData, intervalMs = SSE_INTERVAL_MS) {
+  activeSseCount++;
+  const sseId = `${req.path}:${Date.now()}`;
+  console.log(`[SSE] Opened ${sseId} | active=${activeSseCount}`);
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -72,17 +80,44 @@ function setupSSE(req, res, fetchData, intervalMs = SSE_INTERVAL_MS) {
   res.write('\n');
 
   let closed = false;
+  let consecutiveErrors = 0;
 
   const send = async () => {
     if (closed) return;
+    const start = Date.now();
     try {
       const data = await fetchData();
-      if (!closed) res.write(`data: ${JSON.stringify(data)}\n\n`);
-    } catch (err) {
+      const ms = Date.now() - start;
+      if (ms > 3000) {
+        console.warn(`[SSE] Slow query for ${sseId}: ${ms}ms`);
+      }
       if (!closed) {
-        res.write(`event: error\ndata: ${JSON.stringify({ error: 'Failed to fetch data' })}\n\n`);
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+        consecutiveErrors = 0;
+      }
+    } catch (err) {
+      consecutiveErrors++;
+      console.warn(`[SSE] Query error (${consecutiveErrors}/${SSE_MAX_ERRORS}) for ${sseId} after ${Date.now() - start}ms:`, err.message);
+      if (!closed) {
+        res.write(`event: error\ndata: ${JSON.stringify({ error: 'Temporary data fetch failure' })}\n\n`);
+      }
+      if (consecutiveErrors >= SSE_MAX_ERRORS && !closed) {
+        console.error(`[SSE] Closing ${sseId} — too many consecutive errors`);
+        res.write(`event: close\ndata: ${JSON.stringify({ reason: 'Too many errors, please reconnect' })}\n\n`);
+        cleanup();
+        res.end();
       }
     }
+  };
+
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    activeSseCount--;
+    clearInterval(interval);
+    clearInterval(heartbeat);
+    clearTimeout(maxLifeTimer);
+    console.log(`[SSE] Closed ${sseId} | active=${activeSseCount}`);
   };
 
   send();
@@ -91,18 +126,24 @@ function setupSSE(req, res, fetchData, intervalMs = SSE_INTERVAL_MS) {
     if (!closed) res.write(': heartbeat\n\n');
   }, SSE_HEARTBEAT_MS);
 
-  req.on('close', () => {
-    closed = true;
-    clearInterval(interval);
-    clearInterval(heartbeat);
-  });
+  // Force-close long-lived SSE connections to free pool resources.
+  // The client should auto-reconnect via EventSource.
+  const maxLifeTimer = setTimeout(() => {
+    if (!closed) {
+      console.log(`[SSE] Max duration reached for ${sseId} — forcing reconnect`);
+      res.write(`event: close\ndata: ${JSON.stringify({ reason: 'Connection refresh — please reconnect' })}\n\n`);
+      cleanup();
+      res.end();
+    }
+  }, SSE_MAX_DURATION_MS);
+
+  req.on('close', cleanup);
 }
 
 // ---------------------------------------------------------------------------
 // REST endpoints
 // ---------------------------------------------------------------------------
 
-// List all salesmen with status
 router.get('/users', async (req, res) => {
   try {
     const result = await pool.query(USERS_QUERY);
@@ -113,7 +154,6 @@ router.get('/users', async (req, res) => {
   }
 });
 
-// Live locations of all active salesmen
 router.get('/locations/live', async (req, res) => {
   try {
     const result = await pool.query(LIVE_LOCATIONS_QUERY);
@@ -124,7 +164,6 @@ router.get('/locations/live', async (req, res) => {
   }
 });
 
-// Specific user's session with full route
 router.get('/users/:id/session', async (req, res) => {
   try {
     const userId = parseInt(req.params.id);
@@ -145,8 +184,6 @@ router.get('/users/:id/session', async (req, res) => {
   }
 });
 
-// List sessions for a user (for replay feature)
-// Uses LEFT JOIN instead of correlated subquery for faster point_count calculation
 router.get('/users/:id/sessions', async (req, res) => {
   try {
     const userId = parseInt(req.params.id);
@@ -155,7 +192,6 @@ router.get('/users/:id/sessions', async (req, res) => {
     }
 
     const limit = Math.min(parseInt(req.query.limit) || 50, 100);
-    console.log(`[ADMIN] Fetching sessions for user=${userId}, limit=${limit}`);
     const start = Date.now();
     const result = await pool.query(
       `SELECT s.id, s.checkin_time, s.checkout_time, s.is_active,
@@ -169,7 +205,10 @@ router.get('/users/:id/sessions', async (req, res) => {
        LIMIT $2`,
       [userId, limit]
     );
-    console.log(`[ADMIN] Sessions query for user=${userId} took ${Date.now() - start}ms, rows=${result.rows.length}`);
+    const ms = Date.now() - start;
+    if (ms > 3000) {
+      console.warn(`[ADMIN] Slow sessions query: user=${userId} ${ms}ms rows=${result.rows.length}`);
+    }
     res.json({ sessions: result.rows });
   } catch (err) {
     console.error(`[ADMIN] User sessions error for user=${req.params.id}:`, err.message);
@@ -181,7 +220,6 @@ router.get('/users/:id/sessions', async (req, res) => {
 // SSE (Server-Sent Events) endpoints
 // ---------------------------------------------------------------------------
 
-// SSE: Live locations of all active salesmen (replaces polling on dashboard)
 router.get('/locations/live/stream', (req, res) => {
   setupSSE(req, res, async () => {
     const [locResult, usersResult] = await Promise.all([
@@ -192,7 +230,6 @@ router.get('/locations/live/stream', (req, res) => {
   });
 });
 
-// SSE: Specific user's session with live route updates
 router.get('/users/:id/session/stream', (req, res) => {
   const userId = parseInt(req.params.id);
   if (isNaN(userId) || userId <= 0) {

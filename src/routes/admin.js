@@ -146,6 +146,7 @@ router.get('/users/:id/session', async (req, res) => {
 });
 
 // List sessions for a user (for replay feature)
+// Uses LEFT JOIN instead of correlated subquery for faster point_count calculation
 router.get('/users/:id/sessions', async (req, res) => {
   try {
     const userId = parseInt(req.params.id);
@@ -154,19 +155,24 @@ router.get('/users/:id/sessions', async (req, res) => {
     }
 
     const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+    console.log(`[ADMIN] Fetching sessions for user=${userId}, limit=${limit}`);
+    const start = Date.now();
     const result = await pool.query(
       `SELECT s.id, s.checkin_time, s.checkout_time, s.is_active,
               s.device_platform, s.device_model, s.os_version,
-              (SELECT COUNT(*) FROM location_logs WHERE session_id = s.id) AS point_count
+              COUNT(l.id)::int AS point_count
        FROM sessions s
+       LEFT JOIN location_logs l ON l.session_id = s.id
        WHERE s.user_id = $1
+       GROUP BY s.id
        ORDER BY s.checkin_time DESC
        LIMIT $2`,
       [userId, limit]
     );
+    console.log(`[ADMIN] Sessions query for user=${userId} took ${Date.now() - start}ms, rows=${result.rows.length}`);
     res.json({ sessions: result.rows });
   } catch (err) {
-    console.error('User sessions error:', err.message);
+    console.error(`[ADMIN] User sessions error for user=${req.params.id}:`, err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });

@@ -319,9 +319,11 @@ router.get('/sessions/history', async (req, res) => {
     const result = await pool.query(
       `SELECT s.id, s.checkin_time, s.checkout_time, s.is_active,
               s.device_model, s.device_platform,
-              (SELECT COUNT(*) FROM location_logs WHERE session_id = s.id) AS point_count
+              COUNT(l.id)::int AS point_count
        FROM sessions s
+       LEFT JOIN location_logs l ON l.session_id = s.id
        WHERE s.user_id = $1
+       GROUP BY s.id
        ORDER BY s.checkin_time DESC
        LIMIT $2 OFFSET $3`,
       [req.user.userId, limit, offset]

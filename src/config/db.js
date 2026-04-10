@@ -9,7 +9,8 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   max: 20,
-  idleTimeoutMillis: 30000,
+  min: 1,
+  idleTimeoutMillis: 300000,
   connectionTimeoutMillis: 30000,
   statement_timeout: 15000,
   query_timeout: 15000,
@@ -29,9 +30,10 @@ pool.on('remove', () => {
   console.log(`[DB] Connection removed | total=${totalCount} idle=${idleCount} waiting=${waitingCount}`);
 });
 
-// Keep the free-tier DB awake by pinging it every 4 minutes.
+// Keep the free-tier DB awake by pinging every 3 minutes.
 // Render free Postgres sleeps after ~15 min of inactivity; this prevents that.
-const KEEP_ALIVE_MS = 4 * 60 * 1000;
+// Must be shorter than idleTimeoutMillis (5 min) so the ping arrives before the pool kills the connection.
+const KEEP_ALIVE_MS = 3 * 60 * 1000;
 let keepAliveTimer;
 
 function startKeepAlive() {
